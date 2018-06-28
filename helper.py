@@ -11,6 +11,14 @@ from glob import glob
 from urllib.request import urlretrieve
 from tqdm import tqdm
 
+def timeit(method):
+    def timed(*args, **kw):
+        ts = time.time()
+        result = method(*args, **kw)
+        te = time.time()
+        print('%r  %2.2f ms' % (method.__name__, (te - ts) * 1000))
+        return result
+    return timed
 
 class DLProgress(tqdm):
     last_block = 0
@@ -98,6 +106,25 @@ def gen_batch_function(data_folder, image_shape):
     return get_batches_fn
 
 
+@timeit
+def process_image(image_file, image_pl, image_shape, keep_prob, logits, sess):
+    # [1,5,18,4096] vs. [1,160,576,3]
+    image = scipy.misc.imresize(scipy.misc.imread(image_file), image_shape)
+    if keep_prob is None:
+        init_map = {image_pl: [image]}
+    else:
+        init_map = {keep_prob: 1.0, image_pl: [image]}
+    im_softmax = sess.run([tf.nn.softmax(logits)], init_map)
+    im_softmax = im_softmax[0][:, 1].reshape(image_shape[0], image_shape[1])
+    segmentation = (im_softmax > 0.5).reshape(image_shape[0], image_shape[1], 1)
+    mask = np.dot(segmentation, np.array([[0, 255, 0, 127]]))
+    mask = scipy.misc.toimage(mask, mode="RGBA")
+    street_im = scipy.misc.toimage(image)
+    street_im.paste(mask, box=None, mask=mask)
+    return street_im
+
+
+@timeit
 def gen_test_output(sess, logits, keep_prob, image_pl, data_folder, image_shape):
     """
     Generate test output using the test images
@@ -109,22 +136,13 @@ def gen_test_output(sess, logits, keep_prob, image_pl, data_folder, image_shape)
     :param image_shape: Tuple - Shape of image
     :return: Output for for each test image
     """
-    for image_file in glob(os.path.join(data_folder, 'image_2', '*.png')):
-        image = scipy.misc.imresize(scipy.misc.imread(image_file), image_shape)
-
-        im_softmax = sess.run(
-            [tf.nn.softmax(logits)],
-            {keep_prob: 1.0, image_pl: [image]})
-        im_softmax = im_softmax[0][:, 1].reshape(image_shape[0], image_shape[1])
-        segmentation = (im_softmax > 0.5).reshape(image_shape[0], image_shape[1], 1)
-        mask = np.dot(segmentation, np.array([[0, 255, 0, 127]]))
-        mask = scipy.misc.toimage(mask, mode="RGBA")
-        street_im = scipy.misc.toimage(image)
-        street_im.paste(mask, box=None, mask=mask)
-
+    files = glob(os.path.join(data_folder, 'image_2', '*.png'))
+    for image_file in random.sample(files, 5):
+        street_im = process_image(image_file, image_pl, image_shape, keep_prob, logits, sess)
         yield os.path.basename(image_file), np.array(street_im)
 
 
+@timeit
 def save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image):
     # Make folder for current run
     output_dir = os.path.join(runs_dir, str(time.time()))
